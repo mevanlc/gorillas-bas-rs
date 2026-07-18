@@ -1,7 +1,7 @@
 //! Faithful port of `MakeCityScape` and `PlaceGorillas` (EGA / SCREEN 9 branch),
 //! plus the wind calculation. Draws directly into the scene [`IndexBuffer`].
 
-use crate::ega::{IndexBuffer, SCR_H, SCR_W, SKY};
+use crate::ega::{IndexBuffer, SCR_W, SKY};
 use crate::rng::QbRng;
 use crate::sprites::{gorilla_sprite, Arms};
 
@@ -128,7 +128,8 @@ pub fn make_cityscape(buf: &mut IndexBuffer, rng: &mut QbRng) -> Cityscape {
 
     let last_building = buildings.len(); // 1-based LastBuilding == count
     let wind = compute_wind(rng);
-    draw_wind_arrow(buf, wind);
+    // The wind indicator is rendered as an ASCII arrow in the HUD (see
+    // `App::draw_scene`) rather than baked into the scene as a raster line.
 
     let gorillas = place_gorillas(buf, rng, &buildings, last_building);
 
@@ -149,33 +150,6 @@ fn compute_wind(rng: &mut QbRng) -> i32 {
         }
     }
     wind
-}
-
-/// Draw the wind arrow at the bottom of the field (color = ExplosionColor=2).
-fn draw_wind_arrow(buf: &mut IndexBuffer, wind: i32) {
-    if wind == 0 {
-        return;
-    }
-    let scale = SCR_W / 320; // = 2
-    let wind_line = wind * 3 * scale;
-    let cx = SCR_W / 2;
-    let y = SCR_H - 5;
-    buf.line(cx, y, cx + wind_line, y, crate::ega::EXPLOSION);
-    let arrow_dir = if wind > 0 { -2 } else { 2 };
-    buf.line(
-        cx + wind_line,
-        y,
-        cx + wind_line + arrow_dir,
-        y - 2,
-        crate::ega::EXPLOSION,
-    );
-    buf.line(
-        cx + wind_line,
-        y,
-        cx + wind_line + arrow_dir,
-        y + 2,
-        crate::ega::EXPLOSION,
-    );
 }
 
 /// `PlaceGorillas`: choose buildings 2nd/3rd from each edge and stamp gorillas.

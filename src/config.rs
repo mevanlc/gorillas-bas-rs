@@ -1,5 +1,6 @@
 //! Shared runtime configuration, populated from the CLI.
 
+use crate::render::RendererConfig;
 use crate::subcell::SubcellMode;
 
 #[derive(Clone, Debug)]
@@ -12,7 +13,7 @@ pub struct GameConfig {
     pub gravity: i32,
     pub wind_fixed: Option<i32>,
     pub seed: Option<u32>,
-    pub mode: SubcellMode,
+    pub renderer: RendererConfig,
     /// Accepted for parity with the original; the TUI does not emit sound.
     #[allow(dead_code)]
     pub sound: bool,
@@ -30,7 +31,7 @@ impl Default for GameConfig {
             gravity: 17,
             wind_fixed: None,
             seed: None,
-            mode: SubcellMode::Octant,
+            renderer: RendererConfig::Subcell(SubcellMode::Octant),
             sound: true,
         }
     }

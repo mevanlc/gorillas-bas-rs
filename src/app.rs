@@ -12,13 +12,14 @@ use ratatui::crossterm::{execute, terminal};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::Terminal;
+use unicode_width::UnicodeWidthStr;
 
 use crate::ai::{choose_shot, AiConfig, AiContext};
 use crate::cityscape::{make_cityscape, Cityscape};
 use crate::config::GameConfig;
 use crate::ega::{IndexBuffer, Palette, SKY};
 use crate::physics::{plot_shot, ShotFrame, ShotOutcome, ShotParams};
-use crate::render::draw_field;
+use crate::render::FieldRenderer;
 use crate::rng::QbRng;
 use crate::sprites::{banana_sprite, draw_sun, gorilla_sprite, Arms};
 
@@ -57,6 +58,7 @@ pub struct App {
     pal: Palette,
     scores: [i32; 2],
     last_shot: [(Option<f64>, Option<i32>); 2],
+    renderer: FieldRenderer,
 }
 
 enum RoundResult {
@@ -66,6 +68,7 @@ enum RoundResult {
 
 impl App {
     pub fn new(cfg: GameConfig) -> Self {
+        let renderer = FieldRenderer::new(cfg.renderer.clone());
         let mut rng = QbRng::new();
         match cfg.seed {
             Some(s) => rng.randomize(s),
@@ -77,6 +80,7 @@ impl App {
             pal: Palette::game(),
             scores: [0, 0],
             last_shot: [(None, None), (None, None)],
+            renderer,
         }
     }
 
@@ -129,8 +133,10 @@ impl App {
                         }
                     ),
                     &format!(
-                        "Rounds: {}    Gravity: {}    Render: {:?}",
-                        self.cfg.rounds, self.cfg.gravity, self.cfg.mode
+                        "Rounds: {}    Gravity: {}    Render: {}",
+                        self.cfg.rounds,
+                        self.cfg.gravity,
+                        self.cfg.renderer.name()
                     ),
                     "",
                     "[P] Play      [Q] Quit",
@@ -318,7 +324,7 @@ impl App {
     /// convert to RGB and draw it, then overlay HUD text.
     #[allow(clippy::too_many_arguments)]
     fn draw_scene(
-        &self,
+        &mut self,
         term: &mut Term,
         scene: &IndexBuffer,
         city: &Cityscape,
@@ -348,7 +354,7 @@ impl App {
         term.draw(|f| {
             let area = f.area();
             let buf = f.buffer_mut();
-            draw_field(&fb, self.cfg.mode, area, buf);
+            self.renderer.draw_field(&fb, area, buf);
             // HUD: names top corners.
             paint(buf, area, 0, 0, &p1, Color::Rgb(255, 80, 80));
             let p2x = area.width.saturating_sub(p2.len() as u16);
@@ -362,8 +368,9 @@ impl App {
                 &score,
                 Color::Rgb(120, 200, 255),
             );
-            // Wind readout.
-            let wtxt = format!("Wind: {wind}");
+            // Wind readout: an ASCII arrow whose shaft length encodes speed and
+            // whose head shows direction (e.g. `--=>` blowing right, `<=--` left).
+            let wtxt = format!("Wind: {} {}", wind_arrow(wind), wind);
             center(
                 buf,
                 area,
@@ -386,7 +393,7 @@ impl App {
     }
 
     fn show_status(
-        &self,
+        &mut self,
         term: &mut Term,
         scene: &IndexBuffer,
         city: &Cityscape,
@@ -407,13 +414,12 @@ impl App {
         // Centre banner for ~1.2s.
         let fb = scene.to_rgb(&self.pal);
         let scores = self.scores;
-        let mode = self.cfg.mode;
         let deadline = Instant::now() + Duration::from_millis(1200);
         while Instant::now() < deadline {
             term.draw(|f| {
                 let area = f.area();
                 let buf = f.buffer_mut();
-                draw_field(&fb, mode, area, buf);
+                self.renderer.draw_field(&fb, area, buf);
                 let score = format!("{} > Score < {}", scores[0], scores[1]);
                 center(
                     buf,
@@ -485,11 +491,10 @@ impl App {
             display.put(gx, gy, &spr, None);
             let fb = display.to_rgb(&self.pal);
             let scores = self.scores;
-            let mode = self.cfg.mode;
             term.draw(|f| {
                 let area = f.area();
                 let buf = f.buffer_mut();
-                draw_field(&fb, mode, area, buf);
+                self.renderer.draw_field(&fb, area, buf);
                 let score = format!("{} > Score < {}", scores[0], scores[1]);
                 center(
                     buf,
@@ -541,7 +546,7 @@ impl App {
     /// the distinction surfaced by the caller's Quit handling).
     #[allow(clippy::too_many_arguments)]
     fn read_number(
-        &self,
+        &mut self,
         term: &mut Term,
         scene: &IndexBuffer,
         city: &Cityscape,
@@ -635,7 +640,14 @@ fn paint(buf: &mut Buffer, area: Rect, x: u16, y: u16, text: &str, fg: Color) {
         if cx >= area.width {
             break;
         }
-        let cell = &mut buf[(area.x + cx, area.y + y)];
+        let abs_x = area.x + cx;
+        let abs_y = area.y + y;
+        // If this position is the continuation of a Chafa wide glyph, make its
+        // leading cell narrow so ratatui does not skip the HUD character.
+        if abs_x > area.x && buf[(abs_x - 1, abs_y)].symbol().width() > 1 {
+            buf[(abs_x - 1, abs_y)].set_symbol(" ");
+        }
+        let cell = &mut buf[(abs_x, abs_y)];
         let mut tmp = [0u8; 4];
         cell.set_symbol(ch.encode_utf8(&mut tmp));
         cell.set_fg(fg);
@@ -646,6 +658,22 @@ fn center(buf: &mut Buffer, area: Rect, y: u16, text: &str, fg: Color) {
     let len = text.chars().count() as u16;
     let x = area.width.saturating_sub(len) / 2;
     paint(buf, area, x, y, text, fg);
+}
+
+/// Render the wind as an ASCII arrow: a shaft of `-` whose length is the wind
+/// speed, with a `=>`/`<=` head showing which way it blows. Calm wind (`0`) is a
+/// short bar. Shaft length is capped so it never overruns a narrow HUD.
+fn wind_arrow(wind: i32) -> String {
+    let mag = wind.unsigned_abs().min(20) as usize;
+    if mag == 0 {
+        return "--".to_string();
+    }
+    let shaft = "-".repeat(mag);
+    if wind > 0 {
+        format!("{shaft}=>")
+    } else {
+        format!("<={shaft}")
+    }
 }
 
 /// Explosion crater for a gorilla kill (clears a tall region to sky, mirroring

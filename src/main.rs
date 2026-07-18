@@ -3,7 +3,7 @@
 //! The gameplay simulation (cityscape generation, banana physics, scoring,
 //! RNG) is ported op-for-op from the original `Gorillas.bas` (EGA / SCREEN 9
 //! branch). Graphics are drawn into a 640×350 indexed framebuffer and rendered
-//! to the terminal with sub-cell block glyphs (half-block / sextant / octant).
+//! to the terminal with sub-cell block glyphs or Chafa symbol rendering.
 
 mod ai;
 mod app;
@@ -17,9 +17,13 @@ mod sprites;
 mod subcell;
 mod subcell_tables;
 
-use clap::{Parser, ValueEnum};
+use chafa_syms_rs::CanvasMode;
+use clap::{CommandFactory, Parser, ValueEnum};
 
 use config::GameConfig;
+use render::{
+    configure_chafa_threads, parse_chafa_color, parse_chafa_color_mode, ChafaConfig, RendererConfig,
+};
 use subcell::SubcellMode;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -30,16 +34,8 @@ enum RenderMode {
     Sextant,
     /// 2×4 sub-cells (Unicode 16 block octants) — highest density.
     Octant,
-}
-
-impl From<RenderMode> for SubcellMode {
-    fn from(m: RenderMode) -> Self {
-        match m {
-            RenderMode::Half => SubcellMode::Half,
-            RenderMode::Sextant => SubcellMode::Sextant,
-            RenderMode::Octant => SubcellMode::Octant,
-        }
-    }
+    /// Chafa's tunable Unicode symbol renderer.
+    Chafa,
 }
 
 /// Behaviourally-faithful terminal port of QBasic GORILLAS.
@@ -82,9 +78,41 @@ struct Cli {
     #[arg(long)]
     seed: Option<u32>,
 
-    /// Sub-cell rendering density.
+    /// Framebuffer renderer.
     #[arg(long, value_enum, default_value_t = RenderMode::Octant)]
     render: RenderMode,
+
+    /// Chafa color mode: none, 2, 8, 16, 16/8, 240, 256, or full [default: full].
+    #[arg(long, value_name = "MODE", value_parser = parse_chafa_color_mode)]
+    chafa_colors: Option<CanvasMode>,
+
+    /// Chafa foreground color (rrggbb, #rrggbb, or a basic name) [default: white].
+    #[arg(long, value_name = "COLOR", value_parser = parse_chafa_color)]
+    chafa_fg: Option<u32>,
+
+    /// Chafa background color (rrggbb, #rrggbb, or a basic name) [default: black].
+    #[arg(long, value_name = "COLOR", value_parser = parse_chafa_color)]
+    chafa_bg: Option<u32>,
+
+    /// Chafa work/quality factor, 1-9 [default: 5].
+    #[arg(long, value_name = "1-9")]
+    chafa_work: Option<u32>,
+
+    /// Chafa worker threads (-1 = auto) [default: -1].
+    #[arg(long, value_name = "N", allow_hyphen_values = true)]
+    chafa_threads: Option<i32>,
+
+    /// Chafa symbol selector (for example: block+border, ascii, or all).
+    #[arg(long, value_name = "SPEC")]
+    chafa_symbols: Option<String>,
+
+    /// Make Chafa use foreground colors only.
+    #[arg(long)]
+    chafa_fg_only: bool,
+
+    /// Swap Chafa's foreground and background colors.
+    #[arg(long)]
+    chafa_invert: bool,
 
     /// Disable sound cues (accepted for parity; the TUI is silent).
     #[arg(long)]
@@ -93,6 +121,16 @@ struct Cli {
 
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
+
+    let renderer = match renderer_config(&cli) {
+        Ok(renderer) => renderer,
+        Err(message) => Cli::command()
+            .error(clap::error::ErrorKind::ArgumentConflict, message)
+            .exit(),
+    };
+    if matches!(renderer, RendererConfig::Chafa(_)) {
+        configure_chafa_threads(cli.chafa_threads.unwrap_or(-1));
+    }
 
     // Player 2 is the computer unless the user asked for two humans.
     let ai = !cli.two_player;
@@ -107,10 +145,103 @@ fn main() -> std::io::Result<()> {
         gravity: cli.gravity,
         wind_fixed: cli.wind,
         seed: cli.seed,
-        mode: cli.render.into(),
+        renderer,
         sound: !cli.no_sound,
     };
 
     let mut app = app::App::new(cfg);
     app.run()
+}
+
+fn renderer_config(cli: &Cli) -> Result<RendererConfig, String> {
+    let uses_chafa_flags = cli.chafa_colors.is_some()
+        || cli.chafa_fg.is_some()
+        || cli.chafa_bg.is_some()
+        || cli.chafa_work.is_some()
+        || cli.chafa_threads.is_some()
+        || cli.chafa_symbols.is_some()
+        || cli.chafa_fg_only
+        || cli.chafa_invert;
+
+    match cli.render {
+        RenderMode::Half => {
+            reject_chafa_flags(uses_chafa_flags)?;
+            Ok(RendererConfig::Subcell(SubcellMode::Half))
+        }
+        RenderMode::Sextant => {
+            reject_chafa_flags(uses_chafa_flags)?;
+            Ok(RendererConfig::Subcell(SubcellMode::Sextant))
+        }
+        RenderMode::Octant => {
+            reject_chafa_flags(uses_chafa_flags)?;
+            Ok(RendererConfig::Subcell(SubcellMode::Octant))
+        }
+        RenderMode::Chafa => Ok(RendererConfig::Chafa(ChafaConfig::new(
+            cli.chafa_colors,
+            cli.chafa_fg,
+            cli.chafa_bg,
+            cli.chafa_work,
+            cli.chafa_symbols.as_deref(),
+            cli.chafa_fg_only,
+            cli.chafa_invert,
+        )?)),
+    }
+}
+
+fn reject_chafa_flags(uses_chafa_flags: bool) -> Result<(), String> {
+    if uses_chafa_flags {
+        Err("the --chafa-* options require '--render chafa'".into())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_chafa_renderer_and_prefixed_options() {
+        let cli = Cli::try_parse_from([
+            "gorillas",
+            "--render",
+            "chafa",
+            "--chafa-symbols",
+            "ascii",
+            "--chafa-colors",
+            "256",
+            "--chafa-fg",
+            "cyan",
+            "--chafa-bg",
+            "#102030",
+            "--chafa-work",
+            "7",
+            "--chafa-threads",
+            "4",
+            "--chafa-fg-only",
+            "--chafa-invert",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            renderer_config(&cli),
+            Ok(RendererConfig::Chafa(_))
+        ));
+        assert_eq!(cli.chafa_colors, Some(CanvasMode::Indexed256));
+        assert_eq!(cli.chafa_fg, Some(0x00ffff));
+        assert_eq!(cli.chafa_bg, Some(0x102030));
+        assert_eq!(cli.chafa_work, Some(7));
+        assert_eq!(cli.chafa_threads, Some(4));
+        assert!(cli.chafa_fg_only);
+        assert!(cli.chafa_invert);
+    }
+
+    #[test]
+    fn rejects_chafa_options_with_the_builtin_renderer() {
+        let cli = Cli::try_parse_from(["gorillas", "--chafa-symbols", "ascii"]).unwrap();
+        assert_eq!(
+            renderer_config(&cli).unwrap_err(),
+            "the --chafa-* options require '--render chafa'"
+        );
+    }
 }

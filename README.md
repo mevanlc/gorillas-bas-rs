@@ -5,9 +5,10 @@ banana-throwing artillery game, built with `clap` + `crossterm` + `ratatui`.
 
 The original ran in EGA `SCREEN 9` (640×350, 16 colours). This port keeps the
 game logic on that exact coordinate system and renders it into your terminal
-using Unicode **sub-cell** block glyphs, so the physics, cityscape generation,
-scoring, and "feel" match the 1991 QBasic source op-for-op — while the picture
-scales to whatever terminal size you have.
+using Unicode **sub-cell** block glyphs or the optional `chafa-syms-rs`
+renderer, so the physics, cityscape generation, scoring, and "feel" match the
+1991 QBasic source op-for-op — while the picture scales to whatever terminal
+size you have.
 
 It also adds an optional **computer opponent** with five difficulty levels.
 
@@ -37,8 +38,10 @@ The game is played the way the original was — by typing two numbers per turn:
 - During the banana's flight, **Esc** skips the rest of the animation and **Q**
   quits.
 
-Wind (shown as an arrow along the bottom) pushes the banana each turn; gravity
-pulls it down. Destroy the other gorilla to score.
+Wind pushes the banana each turn; gravity pulls it down. The wind is shown in the
+bottom HUD as an ASCII arrow whose shaft length is the speed and whose head shows
+direction — e.g. `--=>` (blowing right) or `<=----` (blowing left). Destroy the
+other gorilla to score.
 
 ## Command-line options
 
@@ -52,7 +55,15 @@ pulls it down. Destroy the other gorilla to score.
 -g, --gravity <1-99>   Gravity (competition = 17, Earth ≈ 10)      [default: 17]
 --wind <-15..=15>      Fix the wind instead of randomising per round
 --seed <N>             Seed the RNG for a reproducible battlefield
---render <MODE>        Sub-cell density: half | sextant | octant   [default: octant]
+--render <MODE>        Renderer: half | sextant | octant | chafa   [default: octant]
+--chafa-colors <MODE>  Color mode: none | 2 | 8 | 16 | 16/8 | 240 | 256 | full
+--chafa-fg <COLOR>     Default foreground color                    [default: white]
+--chafa-bg <COLOR>     Default background color                    [default: black]
+--chafa-work <1-9>     Work/quality factor                         [default: 5]
+--chafa-threads <N>    Worker threads; -1 selects automatically    [default: -1]
+--chafa-symbols <SPEC> Chafa-style symbol selector
+--chafa-fg-only        Use foreground colors only
+--chafa-invert         Swap foreground and background colors
 --no-sound             Accepted for parity; the TUI is silent
 ```
 
@@ -62,24 +73,42 @@ Examples:
 gorillas --two-player                        # two humans, hot-seat
 gorillas -d 5                                # fight the toughest computer
 gorillas --render sextant                    # if your font lacks octants
+gorillas --render chafa                      # Chafa's default symbol rendering
+gorillas --render chafa --chafa-symbols ascii --chafa-colors 16
 gorillas --seed 1234 --wind 7 -g 10          # reproducible, moon-ish, fixed wind
 ```
 
 ## Rendering modes
 
 The 640×350 EGA framebuffer is scaled and reduced to a grid of terminal cells.
-Each cell picks its two dominant colours and packs the sub-pixels into a Unicode
-block glyph. Three densities are available via `--render`:
+Each built-in mode picks its two dominant colours and packs the sub-pixels into
+a Unicode block glyph. Three densities and the Chafa renderer are available via
+`--render`:
 
 | Mode      | Sub-cells | Glyphs                              | Notes                         |
 |-----------|-----------|-------------------------------------|-------------------------------|
 | `half`    | 1×2       | `▀ ▄ █`                              | Universally supported         |
 | `sextant` | 2×3       | Unicode 13 "legacy computing"       | Needs a sextant-capable font  |
 | `octant`  | 2×4       | Unicode 16 block octants (default)  | Highest density; newest fonts |
+| `chafa`   | 8×8 match | Tunable Unicode symbol set          | Most accurate; more CPU work  |
 
 If the picture looks like boxes/tofu, your terminal font lacks the glyphs — drop
 to `--render sextant` or `--render half`. A larger terminal window always yields
 a sharper image, since more cells means more sub-pixels.
+
+Chafa rendering uses the pure-Rust
+[`chafa-syms-rs`](https://crates.io/crates/chafa-syms-rs) library. Its applicable
+[`chafa-syms-cli`](https://crates.io/crates/chafa-syms-cli) controls are exposed
+with a `--chafa-` prefix and require `--render chafa`. `--chafa-symbols` accepts
+the CLI's selector syntax, including named sets such as `block`, `border`,
+`ascii`, `braille`, `sextant`, `octant`, and `all`. Colors accept `rrggbb`,
+`#rrggbb`, or the basic names `black`, `red`, `green`, `yellow`, `blue`,
+`magenta`, `cyan`, `white`, and `gray`/`grey`.
+
+The standalone CLI's size, scale, and font-ratio options do not apply because
+GORILLAS always stretches its 640×350 framebuffer to the current ratatui
+viewport. Its optimize and format options only control ANSI serialization,
+which this integration bypasses by writing Chafa's cells directly to ratatui.
 
 ## Fidelity notes
 
@@ -142,7 +171,7 @@ disturbing the game's RNG stream.
 | `src/ai.rs`            | Configurable computer opponent                             |
 | `src/subcell.rs`       | RGB → terminal-cell reduction (half/sextant/octant)        |
 | `src/subcell_tables.rs`| Generated bitmask → Unicode block-glyph lookup tables      |
-| `src/render.rs`        | Draw a framebuffer into a ratatui `Buffer`                 |
+| `src/render.rs`        | Built-in/Chafa framebuffer rendering into ratatui           |
 | `src/config.rs`        | Game configuration (mirrors `Gorillas.ini`)                |
 | `src/app.rs`           | Terminal setup, game loop, input, animation                |
 | `src/main.rs`          | `clap` CLI → `GameConfig` → run                            |
@@ -150,6 +179,6 @@ disturbing the game's RNG stream.
 ## Testing
 
 ```sh
-cargo test        # unit tests: RNG, palette, cityscape, physics, AI, subcell
+cargo nextest run # unit tests: RNG, palette, cityscape, physics, AI, rendering
 cargo clippy      # lint-clean
 ```

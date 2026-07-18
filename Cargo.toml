@@ -9,9 +9,12 @@ name = "gorillas"
 path = "src/main.rs"
 
 [dependencies]
+chafa-syms-rs = "0.1.1"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
-ratatui = "0.29"
+ratatui = "0.30"
+rayon = "1.10"
+unicode-width = "0.2"
 
 [profile.release]
 opt-level = 3

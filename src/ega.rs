@@ -15,6 +15,7 @@ pub const SCR_H: i32 = 350;
 // Palette indices with gameplay meaning (see the BASIC CONSTs).
 pub const SKY: u8 = 0; // BACKATTR / background
 pub const GORILLA: u8 = 1; // OBJECTCOLOR
+#[allow(dead_code)] // ExplosionColor: part of the EGA palette map, kept for fidelity
 pub const EXPLOSION: u8 = 2; // ExplosionColor
 pub const SUN: u8 = 3; // SUNATTR
 
