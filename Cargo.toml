@@ -19,3 +19,11 @@ unicode-width = "0.2"
 [profile.release]
 opt-level = 3
 lto = true
+
+# Optimize dependencies even in debug builds. Chafa's per-cell analysis is almost
+# entirely dependency code (`chafa-syms-rs`, `rayon`); unoptimized it renders ~20x
+# slower (~5 fps at a large terminal vs ~130 fps optimized). This keeps our own
+# crate at opt-level 0 — fast incremental builds, debuggable — while making
+# `cargo run` (debug) render at near-release speed.
+[profile.dev.package."*"]
+opt-level = 3

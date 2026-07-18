@@ -38,7 +38,7 @@ impl SubcellMode {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Rgb {
     pub r: u8,
     pub g: u8,

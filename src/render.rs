@@ -2,6 +2,9 @@
 //! built-in sub-cell renderer and `chafa-syms-rs` fill the given area (stretched
 //! to fit), matching how the original stretched its EGA screen to the display.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use chafa_syms_rs::palette::{INDEX_FG, INDEX_TRANSPARENT};
 use chafa_syms_rs::{Canvas, CanvasConfig, CanvasMode, CellOut, PixelType, SymbolMap};
 use ratatui::buffer::Buffer;
@@ -169,6 +172,10 @@ struct ChafaRenderer {
     config: ChafaConfig,
     canvas: Option<SizedCanvas>,
     rgb: Vec<u8>,
+    /// Hash of the framebuffer that produced the canvas's current cells, used to
+    /// skip Chafa's symbol matching when the bitmap has not changed since the
+    /// last frame. `None` until the first render.
+    last_hash: Option<u64>,
 }
 
 struct SizedCanvas {
@@ -185,6 +192,7 @@ impl FieldRenderer {
                 config,
                 canvas: None,
                 rgb: Vec::new(),
+                last_hash: None,
             })),
         };
         Self { backend }
@@ -244,22 +252,42 @@ impl ChafaRenderer {
             });
         }
 
-        self.rgb.clear();
-        self.rgb.reserve(fb.px.len() * 3);
-        for pixel in &fb.px {
-            self.rgb.extend_from_slice(&[pixel.r, pixel.g, pixel.b]);
+        // Chafa's symbol matching is the expensive part, so only re-run it when
+        // the bitmap actually changed (or a resize forced a fresh canvas). On an
+        // unchanged frame the canvas keeps its previously computed cells.
+        let hash = frame_hash(fb);
+        if needs_canvas || self.last_hash != Some(hash) {
+            self.last_hash = Some(hash);
+            self.rgb.clear();
+            self.rgb.reserve(fb.px.len() * 3);
+            for pixel in &fb.px {
+                self.rgb.extend_from_slice(&[pixel.r, pixel.g, pixel.b]);
+            }
+
+            let canvas = &mut self.canvas.as_mut().unwrap().canvas;
+            canvas.draw_all_pixels(
+                PixelType::Rgb8,
+                &self.rgb,
+                fb.width,
+                fb.height,
+                fb.width * 3,
+            );
         }
 
-        let canvas = &mut self.canvas.as_mut().unwrap().canvas;
-        canvas.draw_all_pixels(
-            PixelType::Rgb8,
-            &self.rgb,
-            fb.width,
-            fb.height,
-            fb.width * 3,
-        );
+        // Always re-emit cells: ratatui double-buffers, so the buffer handed to
+        // this frame does not already hold last frame's glyphs.
+        let canvas = &self.canvas.as_ref().unwrap().canvas;
         draw_chafa_cells(canvas.cells(), self.config.mode, area, buf);
     }
+}
+
+/// Hash a framebuffer's dimensions and pixels to detect frame-to-frame changes.
+fn frame_hash(fb: &Framebuffer) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    fb.width.hash(&mut hasher);
+    fb.height.hash(&mut hasher);
+    fb.px.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn draw_chafa_cells(cells: &[CellOut], mode: CanvasMode, area: Rect, buf: &mut Buffer) {
@@ -381,6 +409,36 @@ mod tests {
         assert!(buf.content().iter().any(|cell| {
             cell.symbol() != " " || cell.fg != Color::Reset || cell.bg != Color::Reset
         }));
+    }
+
+    #[test]
+    fn unchanged_frame_reuses_cells_and_still_paints() {
+        // Rendering the same framebuffer twice takes the cached-cells path on the
+        // second call (Chafa's symbol matching is skipped), but must still emit
+        // identical glyphs into ratatui's double-buffered target.
+        let mut fb = Framebuffer::new(2, 2);
+        fb.px = vec![
+            crate::subcell::Rgb::new(255, 0, 0),
+            crate::subcell::Rgb::new(0, 255, 0),
+            crate::subcell::Rgb::new(0, 0, 255),
+            crate::subcell::Rgb::new(255, 255, 255),
+        ];
+        let config = ChafaConfig::new(None, None, None, None, None, false, false).unwrap();
+        let mut renderer = FieldRenderer::new(RendererConfig::Chafa(config));
+        let area = Rect::new(0, 0, 2, 1);
+
+        let mut first = Buffer::empty(area);
+        renderer.draw_field(&fb, area, &mut first);
+        let mut second = Buffer::empty(area);
+        renderer.draw_field(&fb, area, &mut second);
+
+        assert_eq!(first, second);
+
+        // The cache is keyed on content: a changed frame renders fresh cells.
+        fb.px[0] = crate::subcell::Rgb::new(0, 0, 0);
+        let mut third = Buffer::empty(area);
+        renderer.draw_field(&fb, area, &mut third);
+        assert_ne!(second, third);
     }
 
     #[test]

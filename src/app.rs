@@ -450,19 +450,47 @@ impl App {
         if frames.is_empty() {
             return Ok(false);
         }
-        // Target ~1.4s total, clamped to a comfortable per-frame delay.
-        let per = (1400 / frames.len().max(1)).clamp(6, 24) as u64;
-        for fr in frames {
-            self.draw_scene(term, scene, city, tosser, fr.sun_shock, fr.banana, None)?;
-            if let Some(k) = read_key(Duration::from_millis(per))? {
+        // Play the trajectory on a wall-clock schedule rather than one draw per
+        // physics step. The frame shown is chosen from elapsed time against a fixed
+        // budget, so a slow renderer (e.g. Chafa on a big terminal) DROPS frames to
+        // stay on time instead of playing the banana in slow motion. This is the
+        // frame-rate governor a real game loop has; without it, heavier renderers
+        // stretch and stutter the animation.
+        //
+        // The budget mirrors the old pacing (~22 ms/frame, so ~1.4 s for a typical
+        // arc) so the banana's speed is unchanged when the renderer keeps up.
+        let per = (1400 / frames.len()).clamp(6, 24) as u64;
+        let budget = Duration::from_millis(per * frames.len() as u64);
+        let start = Instant::now();
+        let last = frames.len() - 1;
+        let mut drawn: Option<usize> = None;
+        loop {
+            let elapsed = start.elapsed();
+            let idx = if budget.is_zero() {
+                last
+            } else {
+                let frac = elapsed.as_secs_f64() / budget.as_secs_f64();
+                ((frac * frames.len() as f64) as usize).min(last)
+            };
+            if drawn != Some(idx) {
+                let fr = &frames[idx];
+                self.draw_scene(term, scene, city, tosser, fr.sun_shock, fr.banana, None)?;
+                drawn = Some(idx);
+            }
+            // Finish only once the impact frame has actually been shown, so a slow
+            // final render never clips the banana's landing.
+            if elapsed >= budget && drawn == Some(last) {
+                return Ok(false);
+            }
+            // Brief input poll doubles as the pacing sleep and the Esc/Q check.
+            if let Some(k) = read_key(Duration::from_millis(5))? {
                 match k.code {
                     KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(true),
-                    KeyCode::Esc => break, // skip the rest of the animation
+                    KeyCode::Esc => return Ok(false), // skip the rest of the animation
                     _ => {}
                 }
             }
         }
-        Ok(false)
     }
 
     fn victory_dance(
